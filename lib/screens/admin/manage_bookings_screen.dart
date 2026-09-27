@@ -1,0 +1,313 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+
+import '../../models/booking.dart';
+import '../../models/user.dart';
+import '../../blocs/auth/auth_bloc.dart';
+import '../../blocs/booking/booking_bloc.dart';
+import '../../blocs/booking/booking_event.dart';
+import '../../utils/formatters.dart';
+
+/// Back-office view of bookings, filtered by status. Everyone on the staff
+/// side can view; approving, rescheduling and cancelling is admin-only.
+class ManageBookingsScreen extends StatefulWidget {
+  const ManageBookingsScreen({super.key});
+
+  @override
+  State<ManageBookingsScreen> createState() => _ManageBookingsScreenState();
+}
+
+class _ManageBookingsScreenState extends State<ManageBookingsScreen> {
+  BookingStatus? _filter; // null = all
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) context.read<BookingBloc>().add(const BookingStarted());
+    });
+  }
+
+  void _refresh() => context.read<BookingBloc>().add(const BookingStarted());
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = context.watch<BookingBloc>();
+    final all = provider.all;
+    final list = _filter == null
+        ? all
+        : all.where((b) => b.status == _filter).toList();
+    final isAdmin =
+        context.watch<AuthBloc>().state.currentUser?.role == UserRole.admin;
+
+    return Column(
+      children: [
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            children: [
+              _chip('All', null),
+              _chip('Pending', BookingStatus.pending),
+              _chip('Approved', BookingStatus.approved),
+              _chip('Cancelled', BookingStatus.cancelled),
+            ],
+          ),
+        ),
+        Expanded(
+          child: RefreshIndicator(
+            onRefresh: () async => _refresh(),
+            child: list.isEmpty
+                ? ListView(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    children: const [
+                      SizedBox(height: 120),
+                      Center(child: Text('No bookings in this category')),
+                    ],
+                  )
+                : ListView.builder(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                    itemCount: list.length,
+                    itemBuilder: (_, i) =>
+                        _AdminBookingCard(booking: list[i], isAdmin: isAdmin),
+                  ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _chip(String label, BookingStatus? status) {
+    final selected = _filter == status;
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: ChoiceChip(
+        label: Text(label),
+        selected: selected,
+        onSelected: (_) => setState(() => _filter = status),
+      ),
+    );
+  }
+}
+
+class _AdminBookingCard extends StatelessWidget {
+  final Booking booking;
+  final bool isAdmin;
+  const _AdminBookingCard({required this.booking, required this.isAdmin});
+
+  Color _color() {
+    switch (booking.status) {
+      case BookingStatus.approved:
+        return Colors.green;
+      case BookingStatus.pending:
+        return Colors.orange;
+      case BookingStatus.cancelled:
+        return Colors.red;
+    }
+  }
+
+  void _showCustomerInfo(BuildContext context) {
+    final users = context.read<AuthBloc>().state.users;
+    AppUser? customer;
+    for (final u in users) {
+      if (u.id == booking.customerId) {
+        customer = u;
+        break;
+      }
+    }
+    showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Customer details'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _infoRow('Name', customer?.name ?? booking.customerName),
+            _infoRow('Email', customer?.email ?? '—'),
+            _infoRow('Phone', customer?.phone ?? '—'),
+            const Divider(height: 20),
+            _infoRow('Booking', booking.id),
+            _infoRow('Guests', '${booking.guests}'),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _infoRow(String label, String value) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 70,
+              child: Text(label,
+                  style: const TextStyle(fontWeight: FontWeight.w600)),
+            ),
+            Expanded(child: Text(value)),
+          ],
+        ),
+      );
+
+  Future<void> _cancel(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Cancel booking?'),
+        content: Text(
+            'Are you sure you want to cancel booking ${booking.id} for ${booking.customerName}? This action cannot be undone.'),
+        actionsAlignment: MainAxisAlignment.center,
+        actions: [
+          Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              FilledButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('No'),
+              ),
+              const SizedBox(height: 8),
+              TextButton(
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.red,
+                  textStyle: const TextStyle(fontSize: 13),
+                ),
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: const Text('Yes, cancel'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true && context.mounted) {
+      context.read<BookingBloc>().add(BookingCancelRequested(booking.id));
+    }
+  }
+
+  Future<void> _reschedule(BuildContext context) async {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    // firstDate/lastDate must bracket the *existing* stay too, or
+    // showDateRangePicker's initialDateRange assertion fails whenever the
+    // booking's check-in is already in the past (or its check-out is more
+    // than a year out).
+    final firstDate =
+        booking.checkIn.isBefore(today) ? booking.checkIn : today;
+    final lastDate = today.add(const Duration(days: 365));
+    final picked = await showDateRangePicker(
+      context: context,
+      firstDate: firstDate,
+      lastDate: booking.checkOut.isAfter(lastDate) ? booking.checkOut : lastDate,
+      initialDateRange:
+          DateTimeRange(start: booking.checkIn, end: booking.checkOut),
+    );
+    if (picked != null && context.mounted) {
+      context
+          .read<BookingBloc>()
+          .add(BookingRescheduleRequested(booking.id, picked.start, picked.end));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Booking rescheduled')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = context.read<BookingBloc>();
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text('${booking.roomName}  (${booking.id})',
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold, fontSize: 15)),
+                ),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: _color().withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(booking.status.label,
+                      style: TextStyle(
+                          color: _color(),
+                          fontWeight: FontWeight.bold,
+                          fontSize: 12)),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                      'Guest: ${booking.customerName} · ${booking.guests} guests'),
+                ),
+                TextButton.icon(
+                  onPressed: () => _showCustomerInfo(context),
+                  icon: const Icon(Icons.person_outline, size: 18),
+                  label: const Text('View customer'),
+                  style: TextButton.styleFrom(
+                    minimumSize: const Size(0, 32),
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ),
+              ],
+            ),
+            Text('${Format.date(booking.checkIn)} → '
+                '${Format.date(booking.checkOut)} (${booking.nights} nights)'),
+            Text('${Format.money(booking.totalPrice)} · '
+                '${booking.paymentStatus.label}'),
+            const SizedBox(height: 8),
+            if (isAdmin && booking.status != BookingStatus.cancelled)
+              Wrap(
+                spacing: 8,
+                children: [
+                  if (booking.status == BookingStatus.pending)
+                    FilledButton.icon(
+                      onPressed: () =>
+                          provider.add(BookingApproveRequested(booking.id)),
+                      icon: const Icon(Icons.check, size: 18),
+                      style: FilledButton.styleFrom(
+                          minimumSize: const Size(0, 40)),
+                      label: const Text('Approve'),
+                    ),
+                  OutlinedButton.icon(
+                    onPressed: () => _reschedule(context),
+                    icon: const Icon(Icons.edit_calendar, size: 18),
+                    style: OutlinedButton.styleFrom(
+                        minimumSize: const Size(0, 40)),
+                    label: const Text('Reschedule'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () => _cancel(context),
+                    icon: const Icon(Icons.close, size: 18),
+                    style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.red,
+                        minimumSize: const Size(0, 40)),
+                    label: const Text('Cancel'),
+                  ),
+                ],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}

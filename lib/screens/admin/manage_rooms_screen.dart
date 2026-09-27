@@ -1,0 +1,200 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+
+import '../../models/room.dart';
+import '../../models/user.dart';
+import '../../blocs/auth/auth_bloc.dart';
+import '../../blocs/room/room_bloc.dart';
+import '../../blocs/room/room_event.dart';
+import '../../utils/formatters.dart';
+import '../../widgets/app_image.dart';
+import 'room_form_screen.dart';
+
+/// Room inventory management: add/remove rooms, update price, toggle the
+/// maintenance status. Everyone on the staff side can view the room list;
+/// editing (price, details, maintenance, add/remove) is admin-only.
+class ManageRoomsScreen extends StatelessWidget {
+  const ManageRoomsScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = context.watch<RoomBloc>();
+    final rooms = provider.allRooms;
+    final isAdmin =
+        context.watch<AuthBloc>().state.currentUser?.role == UserRole.admin;
+
+    return Scaffold(
+      body: ListView.builder(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 96),
+        itemCount: rooms.length,
+        itemBuilder: (_, i) =>
+            _RoomAdminCard(room: rooms[i], isAdmin: isAdmin),
+      ),
+      floatingActionButton: isAdmin
+          ? FloatingActionButton.extended(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const RoomFormScreen()),
+              ),
+              icon: const Icon(Icons.add),
+              label: const Text('Add room'),
+            )
+          : null,
+    );
+  }
+}
+
+class _RoomAdminCard extends StatelessWidget {
+  final Room room;
+  final bool isAdmin;
+  const _RoomAdminCard({required this.room, required this.isAdmin});
+
+  Future<void> _editPrice(BuildContext context) async {
+    final ctrl =
+        TextEditingController(text: room.pricePerNight.toStringAsFixed(0));
+    final result = await showDialog<double>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Update price'),
+        content: TextField(
+          controller: ctrl,
+          keyboardType: TextInputType.number,
+          decoration: const InputDecoration(
+              labelText: 'Price per night (฿)', prefixText: '฿ '),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () =>
+                Navigator.pop(context, double.tryParse(ctrl.text)),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (result != null && context.mounted) {
+      context.read<RoomBloc>().add(RoomUpdatePriceRequested(room.id, result));
+    }
+  }
+
+  Future<void> _confirmDelete(BuildContext context) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Remove room?'),
+        content: Text('Remove "${room.name}" from inventory?'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Remove'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true && context.mounted) {
+      context.read<RoomBloc>().add(RoomRemoveRequested(room.id));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = context.read<RoomBloc>();
+    final maintenance = room.status == RoomStatus.maintenance;
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: SizedBox(
+                    width: 72,
+                    height: 72,
+                    child: AppImage(
+                      url: room.primaryImage,
+                      fit: BoxFit.cover,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(room.name,
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 15)),
+                      Text('${room.type.label} · ${room.capacity} guests',
+                          style: TextStyle(color: Colors.grey.shade600)),
+                      Text('${Format.money(room.pricePerNight)} / night',
+                          style: const TextStyle(
+                              color: Color(0xFF00796B),
+                              fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                ),
+                if (maintenance)
+                  Chip(
+                    label: const Text('Maintenance'),
+                    backgroundColor: Colors.orange.shade100,
+                    visualDensity: VisualDensity.compact,
+                  ),
+              ],
+            ),
+            const Divider(),
+            Row(
+              children: [
+                Row(
+                  children: [
+                    const Text('Maintenance'),
+                    Switch(
+                      value: maintenance,
+                      onChanged: isAdmin
+                          ? (v) => provider.add(RoomSetStatusRequested(
+                                room.id,
+                                v
+                                    ? RoomStatus.maintenance
+                                    : RoomStatus.available,
+                              ))
+                          : null,
+                    ),
+                  ],
+                ),
+                const Spacer(),
+                if (isAdmin) ...[
+                  IconButton(
+                    tooltip: 'Edit price',
+                    icon: const Icon(Icons.attach_money),
+                    onPressed: () => _editPrice(context),
+                  ),
+                  IconButton(
+                    tooltip: 'Edit room',
+                    icon: const Icon(Icons.edit_outlined),
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                          builder: (_) => RoomFormScreen(existing: room)),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Remove room',
+                    icon: const Icon(Icons.delete_outline, color: Colors.red),
+                    onPressed: () => _confirmDelete(context),
+                  ),
+                ],
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
