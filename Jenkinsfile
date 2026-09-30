@@ -26,7 +26,7 @@ spec:
       tty: true
       resources:
         requests: { cpu: '1', memory: 3Gi }
-        limits: { memory: 6Gi }
+        limits: { memory: 7Gi }
 '''
     }
   }
